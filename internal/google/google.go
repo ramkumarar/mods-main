@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/charmbracelet/mods/internal/proto"
 	"github.com/charmbracelet/mods/internal/stream"
@@ -20,13 +21,32 @@ type Config struct {
 	BaseURL        string
 	HTTPClient     *http.Client
 	ThinkingBudget int
+	AuthToken      string // JWT bearer token for Vertex AI
+	UseVertexAPI   bool   // Flag to distinguish between AI Studio and Vertex AI
 }
 
 // DefaultConfig returns the default configuration for the Google API client.
+// It automatically detects whether to use AI Studio or Vertex AI based on the authToken.
 func DefaultConfig(model, authToken string) Config {
-	return Config{
-		BaseURL:    fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, authToken),
-		HTTPClient: &http.Client{},
+	// Check if this looks like a JWT token (contains dots) vs API key
+	isJWT := len(authToken) > 100 && strings.Contains(authToken, ".")
+	
+	if isJWT {
+		// Use Vertex AI with JWT token
+		// You can replace this URL with your fixed Vertex URL
+		return Config{
+			BaseURL:      fmt.Sprintf("https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR_PROJECT/locations/us-central1/publishers/google/models/%s:generateContent", model),
+			HTTPClient:   &http.Client{},
+			AuthToken:    authToken,
+			UseVertexAPI: true,
+		}
+	} else {
+		// Use AI Studio with API key
+		return Config{
+			BaseURL:      fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, authToken),
+			HTTPClient:   &http.Client{},
+			UseVertexAPI: false,
+		}
 	}
 }
 
@@ -236,6 +256,11 @@ func (s *Stream) Current() (proto.Chunk, error) {
 
 func googleSendRequestStream(client *Client, req *http.Request, originalMessages []proto.Message) (*Stream, error) {
 	req.Header.Set("content-type", "application/json")
+	
+	// Set authentication header based on API type
+	if client.config.UseVertexAPI {
+		req.Header.Set("Authorization", "Bearer "+client.config.AuthToken)
+	}
 
 	resp, err := client.config.HTTPClient.Do(req) //nolint:bodyclose // body is closed in stream.Close()
 	if err != nil {

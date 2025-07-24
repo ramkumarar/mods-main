@@ -327,11 +327,18 @@ func (m *Mods) startCompletionCmd(content string) tea.Cmd {
 				accfg.BaseURL = api.BaseURL
 			}
 		case "google":
-			key, err := m.ensureKey(api, "GOOGLE_API_KEY", "https://aistudio.google.com/app/apikey")
-			if err != nil {
-				return modsError{err, "Google authentication failed"}
+			// Try JWT token first (for Vertex AI), then fall back to API key (for AI Studio)
+			if token := os.Getenv("GOOGLE_ACCESS_TOKEN"); token != "" {
+				// Use Vertex AI with JWT token
+				gccfg = google.DefaultConfig(mod.Name, token)
+			} else {
+				// Use AI Studio with API key
+				key, err := m.ensureKey(api, "GOOGLE_API_KEY", "https://aistudio.google.com/app/apikey")
+				if err != nil {
+					return modsError{err, "Google authentication failed"}
+				}
+				gccfg = google.DefaultConfig(mod.Name, key)
 			}
-			gccfg = google.DefaultConfig(mod.Name, key)
 			gccfg.ThinkingBudget = mod.ThinkingBudget
 		case "cohere":
 			key, err := m.ensureKey(api, "COHERE_API_KEY", "https://dashboard.cohere.com/api-keys")
