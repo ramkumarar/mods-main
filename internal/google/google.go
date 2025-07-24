@@ -2,11 +2,8 @@
 package google
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,13 +15,6 @@ import (
 
 var _ stream.Client = &Client{}
 
-const emptyMessagesLimit uint = 300
-
-var (
-	googleHeaderData = []byte("data: ")
-	errorPrefix      = []byte(`event: error`)
-)
-
 // Config represents the configuration for the Google API client.
 type Config struct {
 	BaseURL        string
@@ -35,7 +25,7 @@ type Config struct {
 // DefaultConfig returns the default configuration for the Google API client.
 func DefaultConfig(model, authToken string) Config {
 	return Config{
-		BaseURL:    fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, authToken),
+		BaseURL:    fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, authToken),
 		HTTPClient: &http.Client{},
 	}
 }
@@ -192,11 +182,11 @@ type CompletionMessageResponse struct {
 // Stream struct represents a stream of messages from the Google API.
 type Stream struct {
 	isFinished bool
+	content    string
+	hasContent bool
 
-	reader      *bufio.Reader
-	response    *http.Response
-	err         error
-	unmarshaler Unmarshaler
+	response *http.Response
+	err      error
 
 	httpHeader
 }
@@ -223,67 +213,25 @@ func (s *Stream) Next() bool {
 
 // Close closes the stream.
 func (s *Stream) Close() error {
-	return s.response.Body.Close() //nolint:wrapcheck
+	if s.response != nil && s.response.Body != nil {
+		return s.response.Body.Close() //nolint:wrapcheck
+	}
+	return nil
 }
 
 // Current implements stream.Stream.
-//
-//nolint:gocognit
 func (s *Stream) Current() (proto.Chunk, error) {
-	var (
-		emptyMessagesCount uint
-		hasError           bool
-	)
-
-	for {
-		rawLine, readErr := s.reader.ReadBytes('\n')
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				s.isFinished = true
-				return proto.Chunk{}, stream.ErrNoContent // signals end of stream, not a real error
-			}
-			return proto.Chunk{}, fmt.Errorf("googleStreamReader.processLines: %w", readErr)
-		}
-
-		noSpaceLine := bytes.TrimSpace(rawLine)
-
-		if bytes.HasPrefix(noSpaceLine, errorPrefix) {
-			hasError = true
-			// NOTE: Continue to the next event to get the error data.
-			continue
-		}
-
-		if !bytes.HasPrefix(noSpaceLine, googleHeaderData) || hasError {
-			if hasError {
-				noSpaceLine = bytes.TrimPrefix(noSpaceLine, googleHeaderData)
-				return proto.Chunk{}, fmt.Errorf("googleStreamReader.processLines: %s", noSpaceLine)
-			}
-			emptyMessagesCount++
-			if emptyMessagesCount > emptyMessagesLimit {
-				return proto.Chunk{}, ErrTooManyEmptyStreamMessages
-			}
-			continue
-		}
-
-		noPrefixLine := bytes.TrimPrefix(noSpaceLine, googleHeaderData)
-
-		var chunk CompletionMessageResponse
-		unmarshalErr := s.unmarshaler.Unmarshal(noPrefixLine, &chunk)
-		if unmarshalErr != nil {
-			return proto.Chunk{}, fmt.Errorf("googleStreamReader.processLines: %w", unmarshalErr)
-		}
-		if len(chunk.Candidates) == 0 {
-			return proto.Chunk{}, stream.ErrNoContent
-		}
-		parts := chunk.Candidates[0].Content.Parts
-		if len(parts) == 0 {
-			return proto.Chunk{}, stream.ErrNoContent
-		}
-
-		return proto.Chunk{
-			Content: chunk.Candidates[0].Content.Parts[0].Text,
-		}, nil
+	if !s.hasContent {
+		s.isFinished = true
+		return proto.Chunk{}, stream.ErrNoContent
 	}
+	
+	s.hasContent = false
+	s.isFinished = true
+	
+	return proto.Chunk{
+		Content: s.content,
+	}, nil
 }
 
 func googleSendRequestStream(client *Client, req *http.Request) (*Stream, error) {
@@ -296,10 +244,29 @@ func googleSendRequestStream(client *Client, req *http.Request) (*Stream, error)
 	if isFailureStatusCode(resp) {
 		return new(Stream), client.handleErrorResp(resp)
 	}
+
+	// Read the complete response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return new(Stream), fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Parse the JSON response
+	var response CompletionMessageResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return new(Stream), fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// Extract content from the response
+	var content string
+	if len(response.Candidates) > 0 && len(response.Candidates[0].Content.Parts) > 0 {
+		content = response.Candidates[0].Content.Parts[0].Text
+	}
+
 	return &Stream{
-		reader:      bufio.NewReader(resp.Body),
-		response:    resp,
-		unmarshaler: &JSONUnmarshaler{},
-		httpHeader:  httpHeader(resp.Header),
+		content:    content,
+		hasContent: content != "",
+		response:   resp,
+		httpHeader: httpHeader(resp.Header),
 	}, nil
 }

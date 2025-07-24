@@ -3,3 +3,4 @@ mods
 completions/
 manpages/
 dist/
+*.exe
