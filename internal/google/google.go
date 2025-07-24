@@ -122,7 +122,7 @@ func (c *Client) Request(ctx context.Context, request proto.Request) stream.Stre
 		return stream
 	}
 
-	stream, err = googleSendRequestStream(c, req)
+	stream, err = googleSendRequestStream(c, req, request.Messages)
 	if err != nil {
 		stream.err = err
 	}
@@ -184,6 +184,7 @@ type Stream struct {
 	isFinished bool
 	content    string
 	hasContent bool
+	messages   []proto.Message
 
 	response *http.Response
 	err      error
@@ -202,8 +203,7 @@ func (s *Stream) Err() error { return s.err }
 
 // Messages implements stream.Stream.
 func (s *Stream) Messages() []proto.Message {
-	// Gemini does not support returning streamed messages after the fact.
-	return nil
+	return s.messages
 }
 
 // Next implements stream.Stream.
@@ -234,7 +234,7 @@ func (s *Stream) Current() (proto.Chunk, error) {
 	}, nil
 }
 
-func googleSendRequestStream(client *Client, req *http.Request) (*Stream, error) {
+func googleSendRequestStream(client *Client, req *http.Request, originalMessages []proto.Message) (*Stream, error) {
 	req.Header.Set("content-type", "application/json")
 
 	resp, err := client.config.HTTPClient.Do(req) //nolint:bodyclose // body is closed in stream.Close()
@@ -263,9 +263,21 @@ func googleSendRequestStream(client *Client, req *http.Request) (*Stream, error)
 		content = response.Candidates[0].Content.Parts[0].Text
 	}
 
+	// Build complete conversation messages including the assistant's response
+	messages := make([]proto.Message, len(originalMessages))
+	copy(messages, originalMessages)
+	
+	if content != "" {
+		messages = append(messages, proto.Message{
+			Role:    proto.RoleAssistant,
+			Content: content,
+		})
+	}
+
 	return &Stream{
 		content:    content,
 		hasContent: content != "",
+		messages:   messages,
 		response:   resp,
 		httpHeader: httpHeader(resp.Header),
 	}, nil
